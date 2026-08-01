@@ -46,15 +46,34 @@ async function fetchTeamForm(teamName) {
   const team = searchData?.response?.[0]?.team;
   if (!team) throw new Error("Team not found");
 
-  const fixturesRes = await fetch(
-    `${PROXY_BASE}?endpoint=fixtures&team=${team.id}&last=10`
-  );
-  if (!fixturesRes.ok) throw new Error("Proxy request failed");
-  const fixturesData = await fixturesRes.json();
-  const fixtures = fixturesData?.response || [];
+  // Free API plans block the "last" shortcut and only cover certain
+  // seasons, so pull season-by-season (newest first) until we have
+  // enough finished matches to work with.
+  const currentYear = new Date().getFullYear();
+  const seasonsToTry = [currentYear, currentYear - 1, currentYear - 2, currentYear - 3];
+  let finished = [];
+
+  for (const season of seasonsToTry) {
+    const fixturesRes = await fetch(
+      `${PROXY_BASE}?endpoint=fixtures&team=${team.id}&season=${season}`
+    );
+    if (!fixturesRes.ok) continue;
+    const fixturesData = await fixturesRes.json();
+    const fixtures = fixturesData?.response || [];
+    const seasonFinished = fixtures.filter(
+      (f) => f.fixture?.status?.short === "FT" && f.fixture?.date
+    );
+    finished = finished.concat(seasonFinished);
+    if (finished.length >= 10) break;
+  }
+
+  if (finished.length === 0) throw new Error("No finished fixtures found for this team");
+
+  finished.sort((a, b) => new Date(b.fixture.date) - new Date(a.fixture.date));
+  const recent = finished.slice(0, 10);
 
   let scoredTotal = 0, concededTotal = 0, count = 0;
-  fixtures.forEach((f) => {
+  recent.forEach((f) => {
     const isHome = f.teams?.home?.id === team.id;
     const gf = isHome ? f.goals?.home : f.goals?.away;
     const ga = isHome ? f.goals?.away : f.goals?.home;
@@ -64,7 +83,7 @@ async function fetchTeamForm(teamName) {
       count++;
     }
   });
-  if (count === 0) throw new Error("No recent fixtures found");
+  if (count === 0) throw new Error("No usable score data found");
 
   return {
     scored: +(scoredTotal / count).toFixed(2),
