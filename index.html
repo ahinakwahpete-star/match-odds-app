@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Match Odds Lab</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; }
+  #root { min-height: 100vh; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useMemo } = React;
+
+function factorial(n) {
+  let r = 1;
+  for (let i = 2; i <= n; i++) r *= i;
+  return r;
+}
+function poissonPMF(k, lambda) {
+  return (Math.exp(-lambda) * Math.pow(lambda, k)) / factorial(k);
+}
+
+const PAPER = "#EFE6CF";
+const PAPER_DEEP = "#E3D5B0";
+const INK = "#24211B";
+const STAMP = "#A5332B";
+const TEAL = "#3C6E64";
+const LINE = "#B8A88A";
+
+const HOME_ADV = 1.15;
+const AWAY_ADV = 0.9;
+const PROXY_BASE = "https://football-proxy-sepia.vercel.app/api/football";
+
+async function fetchTeamForm(teamName) {
+  const searchRes = await fetch(
+    `${PROXY_BASE}?endpoint=teams&search=${encodeURIComponent(teamName)}`
+  );
+  if (!searchRes.ok) throw new Error("Proxy request failed");
+  const searchData = await searchRes.json();
+  const team = searchData?.response?.[0]?.team;
+  if (!team) throw new Error("Team not found");
+
+  const fixturesRes = await fetch(
+    `${PROXY_BASE}?endpoint=fixtures&team=${team.id}&last=10`
+  );
+  if (!fixturesRes.ok) throw new Error("Proxy request failed");
+  const fixturesData = await fixturesRes.json();
+  const fixtures = fixturesData?.response || [];
+
+  let scoredTotal = 0, concededTotal = 0, count = 0;
+  fixtures.forEach((f) => {
+    const isHome = f.teams?.home?.id === team.id;
+    const gf = isHome ? f.goals?.home : f.goals?.away;
+    const ga = isHome ? f.goals?.away : f.goals?.home;
+    if (gf != null && ga != null) {
+      scoredTotal += gf;
+      concededTotal += ga;
+      count++;
+    }
+  });
+  if (count === 0) throw new Error("No recent fixtures found");
+
+  return {
+    scored: +(scoredTotal / count).toFixed(2),
+    conceded: +(concededTotal / count).toFixed(2),
+    fullName: team.name,
+    gamesUsed: count,
+  };
+}
+
+function CouponPredictor() {
+  const [homeName, setHomeName] = useState("HOME");
+  const [awayName, setAwayName] = useState("AWAY");
+  const [homeScored, setHomeScored] = useState(1.7);
+  const [homeConceded, setHomeConceded] = useState(1.1);
+  const [awayScored, setAwayScored] = useState(1.3);
+  const [awayConceded, setAwayConceded] = useState(1.4);
+  const [neutral, setNeutral] = useState(false);
+  const [calcKey, setCalcKey] = useState(1);
+  const [shown, setShown] = useState(true);
+
+  const [homeFetch, setHomeFetch] = useState({ loading: false, error: null, note: null });
+  const [awayFetch, setAwayFetch] = useState({ loading: false, error: null, note: null });
+
+  async function pullRealStats(side) {
+    const name = side === "home" ? homeName : awayName;
+    const setFetchState = side === "home" ? setHomeFetch : setAwayFetch;
+    const setScored = side === "home" ? setHomeScored : setAwayScored;
+    const setConceded = side === "home" ? setHomeConceded : setAwayConceded;
+
+    setFetchState({ loading: true, error: null, note: null });
+    try {
+      const result = await fetchTeamForm(name);
+      setScored(result.scored);
+      setConceded(result.conceded);
+      setFetchState({ loading: false, error: null, note: `${result.fullName}: last ${result.gamesUsed} games` });
+    } catch (e) {
+      setFetchState({ loading: false, error: e.message, note: null });
+    }
+  }
+
+  const { homeXG, awayXG } = useMemo(() => {
+    const rawHome = (homeScored + awayConceded) / 2;
+    const rawAway = (awayScored + homeConceded) / 2;
+    const hAdv = neutral ? 1 : HOME_ADV;
+    const aAdv = neutral ? 1 : AWAY_ADV;
+    return {
+      homeXG: Math.min(6, Math.max(0.1, rawHome * hAdv)),
+      awayXG: Math.min(6, Math.max(0.1, rawAway * aAdv)),
+    };
+  }, [homeScored, homeConceded, awayScored, awayConceded, neutral]);
+
+  const stats = useMemo(() => {
+    const N = 12;
+    let homeWin = 0, draw = 0, awayWin = 0, over25 = 0, bttsYes = 0;
+    let best = { i: 0, j: 0, p: 0 };
+    const full = [];
+    for (let i = 0; i < N; i++) {
+      full.push([]);
+      const pi = poissonPMF(i, homeXG);
+      for (let j = 0; j < N; j++) {
+        const p = pi * poissonPMF(j, awayXG);
+        full[i].push(p);
+        if (i > j) homeWin += p;
+        else if (i === j) draw += p;
+        else awayWin += p;
+        if (i + j > 2) over25 += p;
+        if (i > 0 && j > 0) bttsYes += p;
+        if (p > best.p) best = { i, j, p };
+      }
+    }
+    const DISP = 6;
+    const grid = [];
+    let maxCell = 0;
+    for (let i = 0; i <= DISP; i++) {
+      grid.push([]);
+      for (let j = 0; j <= DISP; j++) {
+        let p;
+        if (i < DISP && j < DISP) p = full[i][j];
+        else if (i === DISP && j < DISP) { p = 0; for (let x = DISP; x < N; x++) p += full[x][j]; }
+        else if (j === DISP && i < DISP) { p = 0; for (let y = DISP; y < N; y++) p += full[i][y]; }
+        else { p = 0; for (let x = DISP; x < N; x++) for (let y = DISP; y < N; y++) p += full[x][y]; }
+        grid[i].push(p);
+        if (p > maxCell) maxCell = p;
+      }
+    }
+    return { homeWin, draw, awayWin, over25, under25: 1 - over25, bttsYes, bttsNo: 1 - bttsYes, best, grid, maxCell };
+  }, [homeXG, awayXG, calcKey]);
+
+  const pct = (x) => (x * 100).toFixed(1) + "%";
+  const outcomeMax = Math.max(stats.homeWin, stats.draw, stats.awayWin);
+  const serialNo = useMemo(() => Math.floor(100000 + Math.random() * 899999), [calcKey]);
+
+  function runCalc() {
+    setShown(false);
+    setCalcKey((k) => k + 1);
+    requestAnimationFrame(() => requestAnimationFrame(() => setShown(true)));
+  }
+
+  return (
+    <div style={{ minHeight: "100vh", background: PAPER_DEEP, backgroundImage: "radial-gradient(circle at 20% 15%, rgba(0,0,0,0.03) 0, transparent 40%), radial-gradient(circle at 85% 80%, rgba(0,0,0,0.04) 0, transparent 45%)", color: INK, fontFamily: "'Courier Prime', monospace", padding: "32px 14px 64px" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Special+Elite&family=Courier+Prime:wght@400;700&display=swap');
+        * { box-sizing: border-box; }
+        .stamp-font { font-family: 'Special Elite', cursive; }
+        input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+        .flip-cell { animation: stampIn 0.4s ease both; }
+        @keyframes stampIn { from { opacity: 0; transform: scale(1.5); } to { opacity: 1; transform: scale(1); } }
+        .perf { background-image: radial-gradient(circle, ${PAPER_DEEP} 3px, transparent 3.5px); background-size: 16px 16px; background-position: -8px center; height: 12px; }
+        .btn-punch { transition: transform 0.12s ease, box-shadow 0.12s ease; cursor: pointer; }
+        .btn-punch:hover { transform: translateY(-1px); }
+        .btn-punch:active { transform: translateY(1px) scale(0.98); }
+        .xg-btn:hover { background: ${INK}; color: ${PAPER}; }
+        .fetch-btn { transition: opacity 0.15s ease; cursor: pointer; }
+        .fetch-btn:disabled { opacity: 0.5; cursor: default; }
+        .neutral-toggle { transition: all 0.15s ease; cursor: pointer; }
+      `}</style>
+
+      <div style={{ maxWidth: 720, margin: "0 auto", background: PAPER, border: `1px solid ${LINE}`, boxShadow: "0 2px 0 rgba(0,0,0,0.04), 0 12px 30px rgba(0,0,0,0.15)" }}>
+        <div style={{ padding: "26px 30px 16px", textAlign: "center" }}>
+          <div style={{ fontSize: 11, letterSpacing: "0.25em", color: TEAL, marginBottom: 6 }}>No. {serialNo} · POISSON FORECAST COUPON</div>
+          <div className="stamp-font" style={{ fontSize: "clamp(28px, 6vw, 40px)", color: INK }}>SCORELINE FORECAST</div>
+          <div style={{ fontSize: 12.5, color: "#5B5548", marginTop: 8, maxWidth: 460, marginLeft: "auto", marginRight: "auto" }}>
+            Type each team's name, tap "Pull real stats" to fetch their last 10 games from API-Football, or enter scored/conceded per game yourself.
+          </div>
+        </div>
+
+        <div className="perf" />
+
+        <div style={{ padding: "22px 30px" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: 14 }}>
+            <TeamField label="HOME" name={homeName} setName={setHomeName} scored={homeScored} setScored={setHomeScored} conceded={homeConceded} setConceded={setHomeConceded} fetchState={homeFetch} onFetch={() => pullRealStats("home")} />
+            <div className="stamp-font" style={{ alignSelf: "center", fontSize: 20, color: STAMP }}>v</div>
+            <TeamField label="AWAY" name={awayName} setName={setAwayName} scored={awayScored} setScored={setAwayScored} conceded={awayConceded} setConceded={setAwayConceded} fetchState={awayFetch} onFetch={() => pullRealStats("away")} align="right" />
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "center", marginTop: 18 }}>
+            <button onClick={() => setNeutral((n) => !n)} className="neutral-toggle stamp-font" style={{ background: neutral ? STAMP : "transparent", color: neutral ? PAPER : INK, border: `1px solid ${neutral ? STAMP : LINE}`, borderRadius: 3, padding: "8px 18px", fontSize: 13, letterSpacing: "0.1em" }}>
+              {neutral ? "✓ NEUTRAL VENUE" : "PLAYED AT NEUTRAL VENUE?"}
+            </button>
+          </div>
+          <div style={{ textAlign: "center", fontSize: 10.5, color: "#8A8168", marginTop: 8 }}>
+            Model reads: {homeName || "HOME"} {homeXG.toFixed(2)} xG — {awayName || "AWAY"} {awayXG.toFixed(2)} xG{!neutral && " (home advantage applied)"}
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "center", marginTop: 18 }}>
+            <button onClick={runCalc} className="btn-punch stamp-font" style={{ background: INK, color: PAPER, border: "none", padding: "12px 34px", fontSize: 16, letterSpacing: "0.1em" }}>
+              STAMP THE COUPON
+            </button>
+          </div>
+        </div>
+
+        {shown && (
+          <React.Fragment>
+            <div className="perf" />
+            <div style={{ padding: "20px 30px 4px" }}>
+              <SectionLabel>RESULT MARKET — 1 X 2</SectionLabel>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginTop: 10 }}>
+                <ResultCell label={homeName || "HOME"} value={stats.homeWin} pct={pct} isMax={stats.homeWin === outcomeMax} delay={0} />
+                <ResultCell label="DRAW" value={stats.draw} pct={pct} isMax={stats.draw === outcomeMax} delay={50} />
+                <ResultCell label={awayName || "AWAY"} value={stats.awayWin} pct={pct} isMax={stats.awayWin === outcomeMax} delay={100} />
+              </div>
+            </div>
+
+            <div style={{ padding: "20px 30px" }}>
+              <SectionLabel>CORRECT SCORE GRID — ROWS {homeName || "HOME"}, COLUMNS {awayName || "AWAY"}</SectionLabel>
+              <div style={{ overflowX: "auto", marginTop: 10 }}>
+                <div style={{ display: "inline-block" }}>
+                  <div style={{ display: "flex" }}>
+                    <div style={{ width: 28 }} />
+                    {stats.grid[0].map((_, j) => (<div key={j} style={{ width: 44, textAlign: "center", fontSize: 11, color: TEAL }}>{j === 6 ? "6+" : j}</div>))}
+                  </div>
+                  {stats.grid.map((row, i) => (
+                    <div style={{ display: "flex" }} key={i}>
+                      <div style={{ width: 28, textAlign: "center", fontSize: 11, color: TEAL, alignSelf: "center" }}>{i === 6 ? "6+" : i}</div>
+                      {row.map((p, j) => {
+                        const alpha = stats.maxCell ? p / stats.maxCell : 0;
+                        const isBest = (i === stats.best.i && j === stats.best.j) || (i === 6 && stats.best.i >= 6 && j === stats.best.j) || (j === 6 && stats.best.j >= 6 && i === stats.best.i);
+                        return (
+                          <div key={j} className="flip-cell" style={{ width: 44, height: 38, margin: 1.5, position: "relative", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, background: `rgba(165, 51, 43, ${0.05 + alpha * 0.4})`, border: `1px solid ${LINE}`, animationDelay: `${(i * 7 + j) * 10}ms` }}>
+                            {(p * 100).toFixed(1)}
+                            {isBest && (<div className="stamp-font" style={{ position: "absolute", inset: -6, border: `2px solid ${STAMP}`, borderRadius: "50%", color: STAMP, transform: "rotate(-14deg)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 8, letterSpacing: "0.05em", pointerEvents: "none", opacity: 0.9 }}>BEST</div>)}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div style={{ marginTop: 14, fontSize: 13, color: "#5B5548" }}>
+                Most likely scoreline: <span className="stamp-font" style={{ color: STAMP, fontSize: 18 }}>{stats.best.i} – {stats.best.j}</span> ({pct(stats.best.p)})
+              </div>
+            </div>
+
+            <div className="perf" />
+
+            <div style={{ padding: "20px 30px 26px" }}>
+              <SectionLabel>SIDE MARKETS</SectionLabel>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10, marginTop: 10 }}>
+                <SplitRow title="OVER / UNDER 2.5 GOALS" leftLabel="OVER" leftValue={stats.over25} rightLabel="UNDER" rightValue={stats.under25} pct={pct} />
+                <SplitRow title="BOTH TEAMS TO SCORE" leftLabel="YES" leftValue={stats.bttsYes} rightLabel="NO" rightValue={stats.bttsNo} pct={pct} />
+              </div>
+            </div>
+          </React.Fragment>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SectionLabel({ children }) {
+  return <div style={{ fontSize: 11, letterSpacing: "0.2em", color: TEAL, borderBottom: `1px dashed ${LINE}`, paddingBottom: 6 }}>{children}</div>;
+}
+
+function NumberDial({ label, value, setValue, align }) {
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div style={{ fontSize: 9.5, letterSpacing: "0.1em", color: "#8A8168", marginBottom: 4 }}>{label}</div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: align === "right" ? "flex-end" : "flex-start", gap: 5 }}>
+        <button className="xg-btn btn-punch" onClick={() => setValue(Math.max(0, +(value - 0.1).toFixed(1)))} style={{ width: 20, height: 20, border: `1px solid ${INK}`, background: "transparent", color: INK, fontSize: 12 }}>−</button>
+        <div className="stamp-font" style={{ fontSize: 17, minWidth: 36, textAlign: "center" }}>{value.toFixed(1)}</div>
+        <button className="xg-btn btn-punch" onClick={() => setValue(Math.min(6, +(value + 0.1).toFixed(1)))} style={{ width: 20, height: 20, border: `1px solid ${INK}`, background: "transparent", color: INK, fontSize: 12 }}>+</button>
+      </div>
+    </div>
+  );
+}
+
+function TeamField({ label, name, setName, scored, setScored, conceded, setConceded, align = "left", fetchState, onFetch }) {
+  return (
+    <div style={{ textAlign: align }}>
+      <div style={{ fontSize: 10.5, letterSpacing: "0.15em", color: TEAL, marginBottom: 6 }}>{label}</div>
+      <input className="stamp-font" value={name} maxLength={24} onChange={(e) => setName(e.target.value.toUpperCase())} style={{ width: "100%", background: "transparent", border: "none", borderBottom: `1px dashed ${LINE}`, color: INK, fontSize: 20, padding: "2px 0 6px", textAlign: align }} />
+      <button onClick={onFetch} disabled={fetchState && fetchState.loading} className="fetch-btn" style={{ marginTop: 8, fontSize: 10, letterSpacing: "0.08em", color: TEAL, background: "transparent", border: `1px dashed ${TEAL}`, borderRadius: 3, padding: "5px 10px" }}>
+        {fetchState && fetchState.loading ? "FETCHING…" : "⟳ PULL REAL STATS"}
+      </button>
+      {fetchState && fetchState.note && (<div style={{ fontSize: 9.5, color: TEAL, marginTop: 4 }}>{fetchState.note}</div>)}
+      {fetchState && fetchState.error && (<div style={{ fontSize: 9.5, color: STAMP, marginTop: 4 }}>{fetchState.error}</div>)}
+      <NumberDial label="SCORED / GAME" value={scored} setValue={setScored} align={align} />
+      <NumberDial label="CONCEDED / GAME" value={conceded} setValue={setConceded} align={align} />
+    </div>
+  );
+}
+
+function ResultCell({ label, value, pct, isMax, delay }) {
+  return (
+    <div className="flip-cell" style={{ animationDelay: `${delay}ms`, border: `1px solid ${isMax ? STAMP : LINE}`, background: isMax ? "rgba(165,51,43,0.08)" : "transparent", padding: "12px 8px", textAlign: "center" }}>
+      <div style={{ fontSize: 10.5, letterSpacing: "0.1em", color: isMax ? STAMP : "#8A8168", marginBottom: 6 }}>{label}</div>
+      <div className="stamp-font" style={{ fontSize: 24, color: isMax ? STAMP : INK }}>{pct(value)}</div>
+    </div>
+  );
+}
+
+function SplitRow({ title, leftLabel, leftValue, rightLabel, rightValue, pct }) {
+  return (
+    <div style={{ border: `1px solid ${LINE}`, padding: "12px 16px" }}>
+      <div style={{ fontSize: 10, letterSpacing: "0.1em", color: "#8A8168", marginBottom: 8 }}>{title}</div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <div><div className="stamp-font" style={{ fontSize: 20, color: STAMP }}>{pct(leftValue)}</div><div style={{ fontSize: 9.5, color: "#8A8168" }}>{leftLabel}</div></div>
+        <div style={{ textAlign: "right" }}><div className="stamp-font" style={{ fontSize: 20 }}>{pct(rightValue)}</div><div style={{ fontSize: 9.5, color: "#8A8168" }}>{rightLabel}</div></div>
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<CouponPredictor />);
+</script>
+</body>
+  </html>
+  
