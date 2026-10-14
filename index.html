@@ -46,10 +46,33 @@ const HOME_ADV = 1.15;
 const AWAY_ADV = 0.9;
 const PROXY_BASE = "https://football-proxy-sepia.vercel.app/api/football";
 
+const CACHE_HOURS = 12;
+function readCache(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    if (Date.now() - o.t > CACHE_HOURS * 3600 * 1000) return null;
+    return o.v;
+  } catch (e) { return null; }
+}
+function writeCache(key, v) {
+  try { localStorage.setItem(key, JSON.stringify({ t: Date.now(), v: v })); } catch (e) {}
+}
+function checkLimit(data) {
+  if (data && data.errors && data.errors.requests) {
+    throw new Error("Daily API limit reached. Try again tomorrow or type the numbers yourself.");
+  }
+}
+
 async function fetchTeamForm(teamName) {
+  const cacheKey = "form:" + teamName.trim().toLowerCase();
+  const cached = readCache(cacheKey);
+  if (cached) return cached;
   const searchRes = await fetch(PROXY_BASE + "?endpoint=teams&search=" + encodeURIComponent(teamName));
   if (!searchRes.ok) throw new Error("Proxy request failed");
   const searchData = await searchRes.json();
+  checkLimit(searchData);
   const team = searchData && searchData.response && searchData.response[0] && searchData.response[0].team;
   if (!team) throw new Error("Team not found");
   const currentYear = new Date().getFullYear();
@@ -59,6 +82,7 @@ async function fetchTeamForm(teamName) {
     const fixturesRes = await fetch(PROXY_BASE + "?endpoint=fixtures&team=" + team.id + "&season=" + season);
     if (!fixturesRes.ok) continue;
     const fixturesData = await fixturesRes.json();
+    checkLimit(fixturesData);
     const fixtures = (fixturesData && fixturesData.response) || [];
     const seasonFinished = fixtures.filter(function (f) {
       return f.fixture && f.fixture.status && f.fixture.status.short === "FT" && f.fixture.date;
@@ -83,12 +107,14 @@ async function fetchTeamForm(teamName) {
     }
   });
   if (count === 0) throw new Error("No usable score data found");
-  return {
+  const result = {
     scored: +(scoredTotal / weightTotal).toFixed(2),
     conceded: +(concededTotal / weightTotal).toFixed(2),
     fullName: team.name,
     gamesUsed: count
   };
+  writeCache(cacheKey, result);
+  return result;
 }
 
 const h = React.createElement;
