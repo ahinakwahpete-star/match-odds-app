@@ -69,21 +69,23 @@ async function fetchTeamForm(teamName) {
   if (finished.length === 0) throw new Error("No finished fixtures found for this team");
   finished.sort(function (a, b) { return new Date(b.fixture.date) - new Date(a.fixture.date); });
   const recent = finished.slice(0, 10);
-  let scoredTotal = 0, concededTotal = 0, count = 0;
-  recent.forEach(function (f) {
+  let scoredTotal = 0, concededTotal = 0, weightTotal = 0, count = 0;
+  recent.forEach(function (f, i) {
+    const w = Math.pow(0.9, i); // i = 0 is the newest game
     const isHome = f.teams && f.teams.home && f.teams.home.id === team.id;
     const gf = isHome ? (f.goals && f.goals.home) : (f.goals && f.goals.away);
     const ga = isHome ? (f.goals && f.goals.away) : (f.goals && f.goals.home);
     if (gf != null && ga != null) {
-      scoredTotal += gf;
-      concededTotal += ga;
+      scoredTotal += gf * w;
+      concededTotal += ga * w;
+      weightTotal += w;
       count++;
     }
   });
   if (count === 0) throw new Error("No usable score data found");
   return {
-    scored: +(scoredTotal / count).toFixed(2),
-    conceded: +(concededTotal / count).toFixed(2),
+    scored: +(scoredTotal / weightTotal).toFixed(2),
+    conceded: +(concededTotal / weightTotal).toFixed(2),
     fullName: team.name,
     gamesUsed: count
   };
@@ -333,5 +335,4 @@ function SplitRow(props) {
 ReactDOM.createRoot(document.getElementById("root")).render(h(CouponPredictor));
 </script>
 </body>
-  </html>
-  
+</html>
